@@ -181,6 +181,7 @@ arma::fmat ConvolutionLayer::Im2Col(sftensor input, uint32_t kernel_w,
   const uint32_t input_padded_h = input_h + 2 * padding_h_;
   const uint32_t input_padded_w = input_w + 2 * padding_w_;
   const float padding_value = 0.f;
+#pragma omp parallel for schedule(dynamic)
   for (uint32_t ic = 0; ic < input_c_group; ++ic) {
     const arma::fmat& input_channel = input->slice(ic + group * input_c_group);
     int current_col = 0;
@@ -215,7 +216,7 @@ arma::fmat ConvolutionLayer::ConvGemm(
     uint32_t kernel_index, uint32_t kernel_count_group,
     const arma::frowvec& kernel, uint32_t output_w, uint32_t output_h) const {
   arma::fmat output(
-      output_tensor->slice(kernel_index + group * kernel_count_group).memptr(),
+      output_tensor->matrix_raw_ptr(kernel_index + group * kernel_count_group),
       output_h, output_w, false, true);
   output = kernel * input_matrix;
   CHECK(output.size() == output_h * output_w)
@@ -260,7 +261,7 @@ void ConvolutionLayer::InitIm2ColWeight() {
       const std::shared_ptr<Tensor<float>>& kernel = this->weights_.at(k);
       for (uint32_t ic = 0; ic < kernel->channels(); ++ic) {
         memcpy(kernel_matrix_c.memptr() + row_len * ic,
-               kernel->slice(ic).memptr(), row_len * sizeof(float));
+               kernel->matrix_raw_ptr(ic), row_len * sizeof(float));
       }
       kernel_matrix_arr.at(k) = kernel_matrix_c;
     }
@@ -276,7 +277,7 @@ void ConvolutionLayer::InitIm2ColWeight() {
             this->weights_.at(k + g * kernel_count_group);
         for (uint32_t ic = 0; ic < kernel->channels(); ++ic) {
           memcpy(kernel_matrix_c.memptr() + row_len * ic,
-                 kernel->slice(ic).memptr(), row_len * sizeof(float));
+                 kernel->matrix_raw_ptr(ic), row_len * sizeof(float));
         }
         kernel_matrix_arr.emplace_back(kernel_matrix_c);
       }
@@ -457,7 +458,11 @@ ParseParameterAttrStatus ConvolutionLayer::GetInstance(
 
   const std::vector<float>& weight_values = weight->get<float>();
   conv_layer->set_weights(weight_values);
-  std::dynamic_pointer_cast<ConvolutionLayer>(conv_layer)->InitIm2ColWeight();
+
+  auto conv_layer_derived =
+      std::dynamic_pointer_cast<ConvolutionLayer>(conv_layer);
+  CHECK(conv_layer_derived != nullptr);
+  conv_layer_derived->InitIm2ColWeight();
   return ParseParameterAttrStatus::kParameterAttrParseSuccess;
 }
 

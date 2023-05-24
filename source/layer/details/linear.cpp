@@ -62,10 +62,12 @@ InferStatus LinearLayer::Forward(
     LOG(ERROR) << "Need one bias tensor in the linear layer";
     return InferStatus::kInferFailedBiasParameterError;
   }
+
   uint32_t batch = inputs.size();
   const std::shared_ptr<Tensor<float>>& weight = weights_.front();
-  arma::fmat weight_data(weight->data().memptr(), out_features_, in_features_,
-                         false, true);
+  arma::fmat weight_data(weight->raw_ptr(), out_features_, in_features_, false,
+                         true);
+  const arma::fmat &weight_data_t = weight_data.t();
 
 #pragma omp parallel for num_threads(batch)
   for (uint32_t i = 0; i < batch; ++i) {
@@ -82,7 +84,7 @@ InferStatus LinearLayer::Forward(
     CHECK(weight_data.n_cols == in_features && in_features == in_features_)
         << "The col of weight tensor should be same to input_features_";
 
-    arma::fmat input_vec(input->data().memptr(), feature_dims, in_features_,
+    arma::fmat input_vec((float*)input->raw_ptr(), feature_dims, in_features_,
                          false, true);
 
     std::shared_ptr<Tensor<float>> output = outputs.at(i);
@@ -105,7 +107,7 @@ InferStatus LinearLayer::Forward(
     }
 
     arma::fmat& result = output->slice(0);
-    result = input_vec * weight_data.t();
+    result = input_vec * weight_data_t;
     if (use_bias_) {
       CHECK(!this->bias_.empty() && this->bias_.size() == 1)
           << "The bias tensor is empty, but use_bias is true";

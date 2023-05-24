@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 #include "layer/abstract/layer_factory.hpp"
+#include "utils/time_logging.hpp"
 
 namespace kuiper_infer {
 RuntimeGraph::RuntimeGraph(std::string param_path, std::string bin_path)
@@ -33,8 +34,8 @@ bool RuntimeGraph::Init() {
   this->graph_ = std::make_unique<pnnx::Graph>();
   int load_result = this->graph_->load(param_path_, bin_path_);
   if (load_result != 0) {
-    LOG(ERROR) << "Can not find the param path or bin path: " << param_path_ << " "
-               << bin_path_;
+    LOG(ERROR) << "Can not find the param path or bin path: " << param_path_
+               << " " << bin_path_;
     return false;
   }
 
@@ -110,11 +111,10 @@ void RuntimeGraph::Build(const std::string& input_name,
   for (const auto& current_op : this->operators_) {
     // 获取当前节点的所有后继节点的names，遍历根据next_op_name从operators_maps_中插入所需要的节点
     const std::vector<std::string>& output_names = current_op->output_names;
-    for (const auto& next_op_name : output_names) {
-      if (const auto& next_op_pair = this->operators_maps_.find(next_op_name);
-          next_op_pair != this->operators_maps_.end()) {
-        current_op->output_operators.insert(
-            {next_op_name, next_op_pair->second});
+    for (const auto& kOutputName : output_names) {
+      if (const auto& output_op = this->operators_maps_.find(kOutputName);
+          output_op != this->operators_maps_.end()) {
+        current_op->output_operators.insert({kOutputName, output_op->second});
       }
     }
   }
@@ -123,7 +123,8 @@ void RuntimeGraph::Build(const std::string& input_name,
     // 除了输入和输出节点，都创建layer
     if (kOperator->type != "pnnx.Input" && kOperator->type != "pnnx.Output") {
       std::shared_ptr<Layer> layer = RuntimeGraph::CreateLayer(kOperator);
-      CHECK(layer != nullptr) << "Layer create failed!";
+      CHECK(layer != nullptr)
+          << "Layer " << kOperator->name << " create failed!";
       if (layer) {
         kOperator->layer = layer;
         layer->set_runtime_operator(kOperator);
@@ -172,6 +173,9 @@ std::vector<std::shared_ptr<Tensor<float>>> RuntimeGraph::Forward(
   for (const auto& op : topo_operators_) {
     op->has_forward = false;
   }
+  if (debug) {
+    utils::LayerTimeStatesSingleton::LayerTimeStatesInit();
+  }
 
   for (const auto& current_op : topo_operators_) {
     if (current_op->type == "pnnx.Input") {
@@ -182,13 +186,27 @@ std::vector<std::shared_ptr<Tensor<float>>> RuntimeGraph::Forward(
       CHECK(current_op->input_operands_seq.size() == 1);
       current_op->output_operands = current_op->input_operands_seq.front();
     } else {
-      InferStatus status = current_op->layer->Forward();
+      InferStatus status;
+      if (debug) {
+        {
+          utils::LayerTimeLogging layer_time_logging(current_op->type);
+          status = current_op->layer->Forward();
+        }
+      } else {
+        status = current_op->layer->Forward();
+      }
       CHECK(status == InferStatus::kInferSuccess)
           << current_op->layer->layer_name()
           << " layer forward failed, error code: " << int(status);
       current_op->has_forward = true;
+
       ProbeNextLayer(current_op, current_op->output_operands->datas);
     }
+  }
+
+  if (debug) {
+    utils::LayerTimeLogging time_summary("");
+    time_summary.SummaryLogging();
   }
 
   for (const auto& op : topo_operators_) {
@@ -324,7 +342,7 @@ void RuntimeGraph::InitGraphParams(
         break;
       }
       default: {
-        LOG(FATAL) << "Unknown parameter type";
+        LOG(FATAL) << "Unknown parameter type: " << type;
       }
     }
   }
@@ -345,7 +363,7 @@ void RuntimeGraph::InitGraphAttrs(
         break;
       }
       default: {
-        LOG(FATAL) << "Unknown attribute type";
+        LOG(FATAL) << "Unknown attribute type: " << attr.type;
       }
     }
   }
@@ -373,9 +391,15 @@ void RuntimeGraph::ProbeNextLayer(
        */
       std::vector<std::shared_ptr<ftensor>>& next_input_datas =
           next_input_operands.at(current_op->name)->datas;
-      CHECK(next_input_datas.size() == layer_output_datas.size());
+      CHECK(next_input_datas.size() == layer_output_datas.size())
+          << "Input data size do not match with output data size";
       // 将当前current_op的输出赋值到next_input_datas中
       for (int i = 0; i < next_input_datas.size(); ++i) {
+        if (next_input_datas.at(i) != nullptr) {
+          CHECK(next_input_datas.at(i)->shapes() ==
+                layer_output_datas.at(i)->shapes())
+              << "Input data shape do not match with output data shapes";
+        }
         next_input_datas.at(i) = layer_output_datas.at(i);
       }
     }

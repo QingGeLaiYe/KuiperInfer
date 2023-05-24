@@ -25,6 +25,33 @@ TEST(test_tensor, tensor_init2) {
   ASSERT_EQ(f1.size(), 224 * 224 * 3);
 }
 
+TEST(test_tensor, tensor_init3) {
+  using namespace kuiper_infer;
+  Tensor<float> f1(std::vector<uint32_t>{1, 13, 14});
+  ASSERT_EQ(f1.channels(), 1);
+  ASSERT_EQ(f1.rows(), 13);
+  ASSERT_EQ(f1.cols(), 14);
+  ASSERT_EQ(f1.size(), 13*14);
+}
+
+TEST(test_tensor, tensor_init4) {
+  using namespace kuiper_infer;
+  Tensor<float> f1(std::vector<uint32_t>{13, 15});
+  ASSERT_EQ(f1.channels(), 1);
+  ASSERT_EQ(f1.rows(), 13);
+  ASSERT_EQ(f1.cols(), 15);
+  ASSERT_EQ(f1.size(), 13 * 15);
+}
+
+TEST(test_tensor, tensor_init5) {
+  using namespace kuiper_infer;
+  Tensor<float> f1(std::vector<uint32_t>{16, 13, 15});
+  ASSERT_EQ(f1.channels(), 16);
+  ASSERT_EQ(f1.rows(), 13);
+  ASSERT_EQ(f1.cols(), 15);
+  ASSERT_EQ(f1.size(), 16 * 13 * 15);
+}
+
 TEST(test_tensor, copy_construct1) {
   using namespace kuiper_infer;
   Tensor<float> f1(3, 224, 224);
@@ -159,6 +186,13 @@ TEST(test_tensor, raw_ptr) {
 
   Tensor<float> f3(3, 3, 3);
   ASSERT_EQ(f3.raw_ptr(), f3.data().mem);
+}
+
+TEST(test_tensor, raw_ptr2) {
+  using namespace kuiper_infer;
+
+  Tensor<float> f3(3, 3, 3);
+  ASSERT_EQ(f3.raw_ptr(1), f3.data().mem + 1);
 }
 
 TEST(test_tensor, index1) {

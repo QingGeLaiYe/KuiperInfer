@@ -11,13 +11,15 @@
 namespace kuiper_infer {
 
 YoloDetectLayer::YoloDetectLayer(
-    int32_t stages, int32_t num_classes, const std::vector<float>& strides,
+    int32_t stages, int32_t num_classes, int32_t num_anchors,
+    const std::vector<float>& strides,
     const std::vector<arma::fmat>& anchor_grids,
     const std::vector<arma::fmat>& grids,
     const std::vector<std::shared_ptr<ConvolutionLayer>>& conv_layers)
     : Layer("yolo"),
       stages_(stages),
       num_classes_(num_classes),
+      num_anchors_(num_anchors),
       strides_(strides),
       anchor_grids_(anchor_grids),
       grids_(grids),
@@ -61,7 +63,6 @@ InferStatus YoloDetectLayer::Forward(
   }
 
   std::vector<std::vector<sftensor>> stage_outputs(stages);
-#pragma omp parallel for num_threads(stages)
   for (uint32_t stage = 0; stage < stages; ++stage) {
     const std::vector<std::shared_ptr<Tensor<float>>>& stage_input =
         batches.at(stage);
@@ -110,7 +111,7 @@ InferStatus YoloDetectLayer::Forward(
       CHECK_EQ(stages_tensor->cols(), classes_info);
 
 #if __SSE2__
-      float* ptr = const_cast<float*>(input->raw_ptr());
+      float* ptr = input->raw_ptr();
       __m128 _one1 = _mm_set1_ps(1.f);
       __m128 _one2 = _mm_set1_ps(1.f);
       __m128 _zero = _mm_setzero_ps();
@@ -136,9 +137,9 @@ InferStatus YoloDetectLayer::Forward(
 #endif
 
       arma::fmat& x_stages = stages_tensor->slice(b);
-      for (uint32_t s = 0; s < stages; ++s) {
-        x_stages.submat(ny * nx * s, 0, ny * nx * (s + 1) - 1,
-                        classes_info - 1) = input->slice(s).t();
+      for (uint32_t na = 0; na < num_anchors_; ++na) {
+        x_stages.submat(ny * nx * na, 0, ny * nx * (na + 1) - 1,
+                        classes_info - 1) = input->slice(na).t();
       }
 
       const arma::fmat& xy = x_stages.submat(0, 0, x_stages.n_rows - 1, 1);
@@ -204,60 +205,7 @@ ParseParameterAttrStatus YoloDetectLayer::GetInstance(
   CHECK(strides.size() == stages_number)
       << "Stride number is not equal to strides";
 
-  std::vector<std::shared_ptr<ConvolutionLayer>> conv_layers(stages_number);
-  int32_t num_classes = -1;
-  std::vector<sftensor> stage_tensors;
-  for (int i = 0; i < stages_number; ++i) {
-    const std::string& weight_name = "m." + std::to_string(i) + ".weight";
-    if (attrs.find(weight_name) == attrs.end()) {
-      LOG(ERROR) << "Can not find the in weight attribute " << weight_name;
-      return ParseParameterAttrStatus::kAttrMissingWeight;
-    }
-
-    const auto& conv_attr = attrs.at(weight_name);
-    const auto& out_shapes = conv_attr->shape;
-    CHECK(out_shapes.size() == 4) << "Stage output shape must equal to four";
-
-    const int out_channels = out_shapes.at(0);
-    if (num_classes == -1) {
-      CHECK(out_channels % stages_number == 0)
-          << "The number of output channel is wrong, it should divisible by "
-             "stages number";
-      num_classes = out_channels / stages_number - 5;
-      CHECK(num_classes > 0)
-          << "The number of object classes must greater than zero";
-    }
-    const int in_channels = out_shapes.at(1);
-    const int kernel_h = out_shapes.at(2);
-    const int kernel_w = out_shapes.at(3);
-
-    CHECK_EQ(op->input_operands_seq.at(i)->shapes.size(), 4);
-    const uint32_t batch_size = op->input_operands_seq.at(i)->shapes.front();
-
-    const uint32_t nx = op->input_operands_seq.at(i)->shapes.at(2);
-    const uint32_t ny = op->input_operands_seq.at(i)->shapes.at(3);
-
-    auto stages_tensor = TensorCreate(batch_size, stages_number * nx * ny,
-                                      uint32_t(num_classes + 5));
-    stage_tensors.push_back(stages_tensor);
-
-    TensorCreate(stages_number * uint32_t(num_classes + 5), nx, ny);
-
-    conv_layers.at(i) = std::make_shared<ConvolutionLayer>(
-        out_channels, in_channels, kernel_h, kernel_w, 0, 0, 1, 1, 1);
-    const std::vector<float>& weights = conv_attr->get<float>();
-    conv_layers.at(i)->set_weights(weights);
-
-    const std::string& bias_name = "m." + std::to_string(i) + ".bias";
-    if (attrs.find(bias_name) == attrs.end()) {
-      LOG(ERROR) << "Can not find the in bias attribute";
-      return ParseParameterAttrStatus::kAttrMissingBias;
-    }
-    const auto& bias_attr = attrs.at(bias_name);
-    const std::vector<float>& bias = bias_attr->get<float>();
-    conv_layers.at(i)->set_bias(bias);
-  }
-
+  int32_t num_anchors = -1;
   std::vector<arma::fmat> anchor_grids;
   for (int i = 4; i >= 0; i -= 2) {
     const std::string& pnnx_name = "pnnx_" + std::to_string(i);
@@ -272,6 +220,15 @@ ParseParameterAttrStatus YoloDetectLayer::GetInstance(
     CHECK(!anchor_shapes.empty() && anchor_shapes.size() == 5 &&
           anchor_shapes.front() == 1)
         << "Anchor shape has a wrong size";
+
+    if (num_anchors == -1) {
+      num_anchors = anchor_shapes.at(1);
+      CHECK(num_anchors > 0)
+          << "The number of anchors must greater than zero";
+    } else {
+      CHECK(num_anchors == anchor_shapes.at(1))
+          << "The number of anchors must be the same";
+    }
 
     const uint32_t anchor_rows =
         anchor_shapes.at(1) * anchor_shapes.at(2) * anchor_shapes.at(3);
@@ -300,6 +257,15 @@ ParseParameterAttrStatus YoloDetectLayer::GetInstance(
     CHECK(!shapes.empty() && shapes.size() == 5 && shapes.front() == 1)
         << "Grid shape has a wrong size";
 
+    if (num_anchors == -1) {
+      num_anchors = shapes.at(1);
+      CHECK(num_anchors > 0)
+          << "The number of anchors must greater than zero";
+    } else {
+      CHECK(num_anchors == shapes.at(1))
+          << "The number of anchors must be the same";
+    }
+
     const uint32_t grid_rows = shapes.at(1) * shapes.at(2) * shapes.at(3);
     const uint32_t grid_cols = shapes.at(4);
     CHECK(weight_data.size() == grid_cols * grid_rows)
@@ -308,8 +274,61 @@ ParseParameterAttrStatus YoloDetectLayer::GetInstance(
     arma::fmat matrix(weight_data.data(), grid_cols, grid_rows);
     grids.emplace_back(matrix.t());
   }
+
+  std::vector<std::shared_ptr<ConvolutionLayer>> conv_layers(stages_number);
+  int32_t num_classes = -1;
+  std::vector<sftensor> stage_tensors;
+  for (int i = 0; i < stages_number; ++i) {
+    const std::string& weight_name = "m." + std::to_string(i) + ".weight";
+    if (attrs.find(weight_name) == attrs.end()) {
+      LOG(ERROR) << "Can not find the in weight attribute " << weight_name;
+      return ParseParameterAttrStatus::kAttrMissingWeight;
+    }
+
+    const auto& conv_attr = attrs.at(weight_name);
+    const auto& out_shapes = conv_attr->shape;
+    CHECK(out_shapes.size() == 4) << "Stage output shape must equal to four";
+
+    const int out_channels = out_shapes.at(0);
+    if (num_classes == -1) {
+      CHECK(out_channels % num_anchors == 0)
+          << "The number of output channel is wrong, it should divisible by "
+             "number of anchors";
+      num_classes = out_channels / num_anchors - 5;
+      CHECK(num_classes > 0)
+          << "The number of object classes must greater than zero";
+    }
+    const int in_channels = out_shapes.at(1);
+    const int kernel_h = out_shapes.at(2);
+    const int kernel_w = out_shapes.at(3);
+
+    CHECK_EQ(op->input_operands_seq.at(i)->shapes.size(), 4);
+    const uint32_t batch_size = op->input_operands_seq.at(i)->shapes.front();
+
+    const uint32_t nx = op->input_operands_seq.at(i)->shapes.at(2);
+    const uint32_t ny = op->input_operands_seq.at(i)->shapes.at(3);
+
+    auto stages_tensor = TensorCreate(batch_size, stages_number * nx * ny,
+                                      uint32_t(num_classes + 5));
+    stage_tensors.push_back(stages_tensor);
+
+    conv_layers.at(i) = std::make_shared<ConvolutionLayer>(
+        out_channels, in_channels, kernel_h, kernel_w, 0, 0, 1, 1, 1);
+    const std::vector<float>& weights = conv_attr->get<float>();
+    conv_layers.at(i)->set_weights(weights);
+
+    const std::string& bias_name = "m." + std::to_string(i) + ".bias";
+    if (attrs.find(bias_name) == attrs.end()) {
+      LOG(ERROR) << "Can not find the in bias attribute";
+      return ParseParameterAttrStatus::kAttrMissingBias;
+    }
+    const auto& bias_attr = attrs.at(bias_name);
+    const std::vector<float>& bias = bias_attr->get<float>();
+    conv_layers.at(i)->set_bias(bias);
+  }
+
   yolo_detect_layer = std::make_shared<YoloDetectLayer>(
-      stages_number, num_classes, strides, anchor_grids, grids, conv_layers);
+      stages_number, num_classes, num_anchors, strides, anchor_grids, grids, conv_layers);
   auto yolo_detect_layer_ =
       std::dynamic_pointer_cast<YoloDetectLayer>(yolo_detect_layer);
 
